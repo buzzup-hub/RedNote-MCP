@@ -14,6 +14,11 @@ export class AuthManager {
   private page: Page | null;
   private cookieManager: CookieManager;
 
+  // Browser instance reuse
+  private static browserInstance: Browser | null = null;
+  private static lastUsed: number = 0;
+  private static readonly BROWSER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
   constructor(cookiePath?: string) {
     logger.info('Initializing AuthManager');
     this.browser = null;
@@ -43,12 +48,105 @@ export class AuthManager {
     this.cookieManager = new CookieManager(cookiePath);
   }
 
+  /**
+   * Check if browser instance is still valid
+   */
+  private static isBrowserValid(): boolean {
+    if (!AuthManager.browserInstance) return false;
+
+    const now = Date.now();
+    const isExpired = now - AuthManager.lastUsed > AuthManager.BROWSER_TIMEOUT;
+    const isConnected = AuthManager.browserInstance.isConnected();
+
+    if (isExpired || !isConnected) {
+      logger.info(`Browser instance invalid (expired: ${isExpired}, connected: ${isConnected})`);
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Clean up static browser instance
+   */
+  private static async cleanupBrowserInstance(): Promise<void> {
+    if (AuthManager.browserInstance) {
+      try {
+        logger.info('Cleaning up static browser instance');
+        await AuthManager.browserInstance.close();
+      } catch (error) {
+        logger.error('Error closing static browser instance:', error);
+      } finally {
+        AuthManager.browserInstance = null;
+      }
+    }
+  }
+
   async getBrowser(): Promise<Browser> {
-    logger.info('Launching browser');
-    // 始终创建新的浏览器实例，不复用之前的
+    logger.info('Getting browser instance');
+
+    // Try to reuse existing browser instance
+    if (AuthManager.isBrowserValid()) {
+      logger.info('Reusing existing browser instance');
+      AuthManager.lastUsed = Date.now();
+      return AuthManager.browserInstance!;
+    }
+
+    // Clean up old instance if it exists
+    await AuthManager.cleanupBrowserInstance();
+
+    logger.info('Launching new browser with enhanced anti-detection config');
     this.browser = await chromium.launch({
       headless: false,
+      args: [
+        '--disable-blink-features=AutomationControlled', // 隐藏自动化特征
+        '--disable-dev-shm-usage',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-infobars',
+        '--disable-extensions',
+        '--disable-plugins-discovery',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-extensions-except',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--no-first-run',
+        '--safebrowsing-disable-auto-update',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-default-apps',
+        '--disable-hang-monitor',
+        '--disable-prompt-on-repost',
+        '--disable-domain-reliability',
+        '--disable-component-update',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+        '--disable-ipc-flooding-protection',
+        '--enable-automation=false',
+        '--password-store=basic',
+        '--use-mock-keychain',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        '--window-size=1920,1080',
+        '--window-position=100,100',
+        '--display=:99',
+      ],
+      ignoreDefaultArgs: ['--enable-blink-features=AutomationControlled'], // 覆盖默认的自动化参数
     });
+
+    // Store as static instance for reuse
+    AuthManager.browserInstance = this.browser;
+    AuthManager.lastUsed = Date.now();
+
     return this.browser;
   }
 
@@ -61,10 +159,7 @@ export class AuthManager {
     const timeoutSeconds = options?.timeout || 10
     logger.info(`Starting login process with timeout: ${timeoutSeconds}s`)
     const timeoutMs = timeoutSeconds * 1000
-    this.browser = await chromium.launch({
-      headless: false,
-      timeout: timeoutMs,
-    })
+    this.browser = await this.getBrowser()
     if (!this.browser) {
       logger.error('Failed to launch browser');
       throw new Error('Failed to launch browser');

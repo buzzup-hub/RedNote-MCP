@@ -31,6 +31,50 @@ const server = new McpServer({
   }
 })
 
+// Global RedNoteTools instance for browser reuse (Solution 1)
+let globalRedNoteTools: RedNoteTools | null = null
+let isInitializing = false
+
+/**
+ * Get or create the global RedNoteTools instance
+ * This ensures we reuse the same browser instance across all requests
+ */
+async function getRedNoteTools(): Promise<RedNoteTools> {
+  if (!globalRedNoteTools) {
+    // Prevent concurrent initialization
+    if (isInitializing) {
+      logger.info('Waiting for existing initialization to complete')
+      while (isInitializing) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      if (globalRedNoteTools) return globalRedNoteTools
+    }
+    
+    isInitializing = true
+    try {
+      logger.info('Creating global RedNoteTools instance')
+      globalRedNoteTools = new RedNoteTools()
+      // Pre-initialize to check login status
+      await globalRedNoteTools.initialize()
+      logger.info('Global RedNoteTools instance created and initialized')
+    } finally {
+      isInitializing = false
+    }
+  }
+  return globalRedNoteTools
+}
+
+/**
+ * Cleanup global instance on server shutdown
+ */
+async function cleanupGlobalTools(): Promise<void> {
+  if (globalRedNoteTools) {
+    logger.info('Cleaning up global RedNoteTools instance')
+    await globalRedNoteTools.cleanup()
+    globalRedNoteTools = null
+  }
+}
+
 // Register tools
 server.tool(
   'search_notes',
@@ -42,7 +86,7 @@ server.tool(
   async ({ keywords, limit = 10 }: { keywords: string; limit?: number }) => {
     logger.info(`Searching notes with keywords: ${keywords}, limit: ${limit}`)
     try {
-      const tools = new RedNoteTools()
+      const tools = await getRedNoteTools() // Reuse global instance
       const notes = await tools.searchNotes(keywords, limit)
       logger.info(`Found ${notes.length} notes`)
       return {
@@ -67,7 +111,7 @@ server.tool(
   async ({ url }: { url: string }) => {
     logger.info(`Getting note content for URL: ${url}`)
     try {
-      const tools = new RedNoteTools()
+      const tools = await getRedNoteTools() // Reuse global instance
       const note = await tools.getNoteContent(url)
       logger.info(`Successfully retrieved note: ${note.title}`)
 
@@ -95,7 +139,7 @@ server.tool(
   async ({ url }: { url: string }) => {
     logger.info(`Getting comments for URL: ${url}`)
     try {
-      const tools = new RedNoteTools()
+      const tools = await getRedNoteTools() // Reuse global instance
       const comments = await tools.getNoteComments(url)
       logger.info(`Found ${comments.length} comments`)
       return {
@@ -134,6 +178,37 @@ server.tool('login', '登录小红书账号', {}, async () => {
   }
 })
 
+// Add publish note tool
+server.tool(
+  'publish_note',
+  '发布图文笔记到小红书',
+  {
+    title: z.string().describe('笔记标题'),
+    content: z.string().describe('笔记内容'),
+    image_paths: z.array(z.string()).describe('图片路径列表'),
+    tags: z.string().optional().describe('标签，用逗号分隔')
+  },
+  async ({ title, content, image_paths, tags = '' }: { title: string; content: string; image_paths: string[]; tags?: string }) => {
+    logger.info(`Publishing note: ${title}`)
+    try {
+      const tools = await getRedNoteTools()
+      const result = await tools.publishNote(title, content, image_paths, tags)
+      logger.info(`Note published successfully: ${result.message}`)
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `发布成功！\n标题: ${result.title}\n图片数量: ${result.imageCount}\n标签: ${result.tags || '无'}\n${result.message}`
+          }
+        ]
+      }
+    } catch (error) {
+      logger.error('Error publishing note:', error)
+      throw error
+    }
+  }
+)
+
 // Start the server
 async function main() {
   logger.info('Starting RedNote MCP Server')
@@ -148,6 +223,22 @@ async function main() {
   // Cleanup on process exit
   process.on('exit', () => {
     stopLogging()
+  })
+  
+  // Cleanup global tools on SIGINT (Ctrl+C)
+  process.on('SIGINT', async () => {
+    logger.info('Received SIGINT, cleaning up...')
+    await cleanupGlobalTools()
+    stopLogging()
+    process.exit(0)
+  })
+  
+  // Cleanup global tools on SIGTERM
+  process.on('SIGTERM', async () => {
+    logger.info('Received SIGTERM, cleaning up...')
+    await cleanupGlobalTools()
+    stopLogging()
+    process.exit(0)
   })
 }
 
